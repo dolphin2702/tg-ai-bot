@@ -93,3 +93,10 @@ class State:
 
     async def clear_history(self, user_id: int, engine: str) -> None:
         await self._del(f"tgbot:user:{user_id}:history:{engine}")
+        
+    # ---- known users (auto-added when they speak in an allowed group) ----
+    async def mark_known(self, user_id: int) -> None:
+        await self._set(f"tgbot:known:{user_id}", "1")
+
+    async def is_known(self, user_id: int) -> bool:
+        return (await self._get(f"tgbot:known:{user_id}")) == "1"

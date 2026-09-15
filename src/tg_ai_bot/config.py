@@ -30,6 +30,7 @@ class Config:
     system_prompt: str
     allowed_users: set[int] = field(default_factory=set)
     allowed_chats: set[int] = field(default_factory=set)
+    group_triggers: list[str] = field(default_factory=list)
 
 
 def _load_engines() -> dict[str, EngineConfig]:
@@ -113,6 +114,8 @@ def load_config() -> Config:
             file=sys.stderr,
         )
         default = fallback
+    triggers_raw = _env("GROUP_TRIGGERS", default="ИИ,AI,бот,bot") or ""
+    group_triggers = [t.strip().lower() for t in triggers_raw.split(",") if t.strip()]
     return Config(
         telegram_token=_env("TELEGRAM_TOKEN", required=True),
         redis_url=_env("REDIS_URL"),
@@ -122,4 +125,5 @@ def load_config() -> Config:
                       or DEFAULT_SYSTEM_PROMPT,
         allowed_users=_parse_ids(_env("ALLOWED_USERS")),
         allowed_chats=_parse_ids(_env("ALLOWED_CHATS")),
+        group_triggers=group_triggers,
     )
