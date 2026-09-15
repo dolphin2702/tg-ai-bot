@@ -171,6 +171,33 @@ To use the bot in a family group:
 
 Each member still has their own history and engine choice (state is per `user_id`).
 
+### Group triggers
+
+In groups, the bot responds **only when addressed**:
+
+1. Message contains `@your_bot_username` mention.
+2. Message is a reply to one of the bot's messages.
+3. Message starts with one of `GROUP_TRIGGERS` words (default: `ии,ai,бот,помощник`).
+
+Examples (`GROUP_TRIGGERS=ии,ai,бот,помощник`):
+
+| Group message | Behaviour |
+|---|---|
+| `AI, What wheater in NY?` | ✅ replies to the answer |
+| `Bot, help me with an excercise` | ✅ replies  |
+| `@your_bot hi` | ✅ replies to "hi" |
+| `hi all!` | ❌ silent |
+| `how are you?` | ❌ silent |
+
+The trigger word is configurable via `GROUP_TRIGGERS`, case-insensitive.
+A separator after the trigger is required (`AI,`, `AI `, `AI:` work; `AAI` does not).
+
+### Auto-access from groups
+
+Anyone who writes in an allowed group (from `ALLOWED_CHATS`) automatically gets
+access to the bot in private chats. No manual addition to `ALLOWED_USERS` needed.
+The known-users list is stored in Redis.
+
 ## Development
 
 ```bash
