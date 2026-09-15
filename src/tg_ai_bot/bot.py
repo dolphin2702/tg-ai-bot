@@ -88,14 +88,13 @@ def _render_prompt(prompt: str, user_id: int) -> str:
 
 
 def _stamp_date(text: str) -> str:
-    """Prepend the current date to a user message.
-
-    Some models (e.g. Mistral Small) ignore the date in the system prompt but
-    respect it inside a user message. We inject it right before sending to the
-    LLM, without persisting it in the stored history.
-    """
+    """Prepend the current date to a user message."""
     now = datetime.now()
-    return f"[Сегодня {now.strftime('%Y-%m-%d')}] {text}"
+    return (
+        f"Сегодня {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}). "
+        f"Текущий год — {now.year}. Считай все даты относительно этой. "
+        f"Запрос: {text}"
+    )
 
 
 async def _safe_edit(placeholder, text: str) -> None:
