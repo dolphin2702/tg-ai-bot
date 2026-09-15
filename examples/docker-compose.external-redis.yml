@@ -1,6 +1,6 @@
 services:
   tg-ai-bot:
-    image: ghcr.io/dolphin2702/tg-ai-bot:v0.1.0
+    image: ghcr.io/dolphin2702/tg-ai-bot:latest
     container_name: tg-ai-bot
     restart: unless-stopped
     env_file: .env

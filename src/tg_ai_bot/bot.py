@@ -87,6 +87,17 @@ def _render_prompt(prompt: str, user_id: int) -> str:
     )
 
 
+def _stamp_date(text: str) -> str:
+    """Prepend the current date to a user message.
+
+    Some models (e.g. Mistral Small) ignore the date in the system prompt but
+    respect it inside a user message. We inject it right before sending to the
+    LLM, without persisting it in the stored history.
+    """
+    now = datetime.now()
+    return f"[Сегодня {now.strftime('%Y-%m-%d')}] {text}"
+
+
 async def _safe_edit(placeholder, text: str) -> None:
     try:
         await placeholder.edit_text(text or "…")
@@ -384,11 +395,14 @@ class Bot:
             system_prompt = _render_prompt(system_prompt, user_id)
 
         if engine.is_stateful():
-            messages = [Message(role="user", content=text)]
+            messages = [Message(role="user", content=_stamp_date(text))]
         else:
             history = await self.state.get_history(user_id, name)
             history.append({"role": "user", "content": text})
             messages = [Message(role=m["role"], content=m["content"]) for m in history]
+            # Stamp date only on the last user message (not persisted in history).
+            if messages and messages[-1].role == "user":
+                messages[-1] = Message(role="user", content=_stamp_date(messages[-1].content))
             if system_prompt:
                 messages = [Message(role="system", content=system_prompt)] + messages
 
@@ -473,6 +487,12 @@ class Bot:
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
+        # Stamp date on the last user message (not persisted in history).
+        if messages and messages[-1]["role"] == "user":
+            messages[-1] = {
+                "role": "user",
+                "content": _stamp_date(messages[-1]["content"]),
+            }
 
         model = await self.state.get_model(user_id, name)
         tools = self.mcp.openai_tools()
