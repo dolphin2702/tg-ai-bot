@@ -61,6 +61,16 @@ class State:
     async def clear_model(self, user_id: int, engine: str) -> None:
         await self._del(f"tgbot:user:{user_id}:model:{engine}")
 
+    # ---- memory id (user-facing identifier for MCP memory) ----
+    async def get_memory_id(self, user_id: int) -> str | None:
+        return await self._get(f"tgbot:user:{user_id}:memory_id")
+
+    async def set_memory_id(self, user_id: int, memory_id: str) -> None:
+        await self._set(f"tgbot:user:{user_id}:memory_id", memory_id)
+
+    async def clear_memory_id(self, user_id: int) -> None:
+        await self._del(f"tgbot:user:{user_id}:memory_id")
+
     # ---- system prompt ----
     async def get_system(self, user_id: int) -> str | None:
         return await self._get(f"tgbot:user:{user_id}:system")
@@ -81,7 +91,7 @@ class State:
     async def clear_thread(self, user_id: int, engine: str) -> None:
         await self._del(f"tgbot:user:{user_id}:thread:{engine}")
 
-    # ---- local history (stateless engines) ----
+    # ---- local history ----
     async def get_history(self, user_id: int, engine: str) -> list[dict]:
         raw = await self._get(f"tgbot:user:{user_id}:history:{engine}")
         return json.loads(raw) if raw else []
@@ -97,7 +107,7 @@ class State:
     async def clear_history(self, user_id: int, engine: str) -> None:
         await self._del(f"tgbot:user:{user_id}:history:{engine}")
 
-    # ---- known users (auto-added when they speak in an allowed group) ----
+    # ---- known users ----
     async def mark_known(self, user_id: int) -> None:
         await self._set(f"tgbot:known:{user_id}", "1")
 

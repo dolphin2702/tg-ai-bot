@@ -21,12 +21,11 @@ from .state import State
 
 log = logging.getLogger(__name__)
 
-EDIT_THROTTLE = 1.0       # seconds between message edits while streaming
-TG_LIMIT = 4000           # Telegram per-message limit
+EDIT_THROTTLE = 1.0
+TG_LIMIT = 4000
 
 
 def _strip_tags(s: str) -> str:
-    """Remove XML-ish tool tags that some backends leave in the output."""
     s = re.sub(r"<[^>]+>", "", s)
     return "\n".join(line for line in s.splitlines() if line.strip())
 
@@ -73,26 +72,28 @@ def _extract_trigger_prefix(text: str, triggers: list[str]) -> str | None:
     return None
 
 
-def _render_prompt(prompt: str, user_id: int) -> str:
+def _render_prompt(prompt: str, memory_id: str) -> str:
     """Substitute placeholders in the system prompt.
 
-    Supported: {user_id}, {date}, {year}.
+    ``memory_id`` is the user-facing identifier used for MCP memory tools.
+    For a Telegram user it may be the numeric id (default) or a custom
+    name set via ``/memory_id`` (e.g. "dmitry").
     """
     now = datetime.now()
     return (
         prompt
-        .replace("{user_id}", str(user_id))
+        .replace("{user_id}", memory_id)
+        .replace("{memory_id}", memory_id)
         .replace("{date}", now.strftime("%Y-%m-%d"))
         .replace("{year}", str(now.year))
     )
 
 
 def _stamp_date(text: str) -> str:
-    """Prepend the current date to a user message."""
     now = datetime.now()
     return (
-        f"Сегодня {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}). "
-        f"Текущий год — {now.year}. Считай все даты относительно этой. "
+        f"Сегодня {now.strftime('%Y-%m-%d')}. "
+        f"Текущий год — {now.year}. Все даты считай относительно этой. "
         f"Запрос: {text}"
     )
 
@@ -140,15 +141,16 @@ class Bot:
 
     def build(self) -> Application:
         app = Application.builder().token(self.cfg.telegram_token).build()
-        app.add_handler(CommandHandler("start",  self.cmd_start))
-        app.add_handler(CommandHandler("help",   self.cmd_help))
-        app.add_handler(CommandHandler("id",     self.cmd_id))
-        app.add_handler(CommandHandler("new",    self.cmd_new))
-        app.add_handler(CommandHandler("engine", self.cmd_engine))
-        app.add_handler(CommandHandler("model",  self.cmd_model))
-        app.add_handler(CommandHandler("system", self.cmd_system))
-        app.add_handler(CommandHandler("status", self.cmd_status))
-        app.add_handler(CommandHandler("stop",   self.cmd_stop))
+        app.add_handler(CommandHandler("start",     self.cmd_start))
+        app.add_handler(CommandHandler("help",      self.cmd_help))
+        app.add_handler(CommandHandler("id",        self.cmd_id))
+        app.add_handler(CommandHandler("new",       self.cmd_new))
+        app.add_handler(CommandHandler("engine",    self.cmd_engine))
+        app.add_handler(CommandHandler("model",     self.cmd_model))
+        app.add_handler(CommandHandler("system",    self.cmd_system))
+        app.add_handler(CommandHandler("memory_id", self.cmd_memory_id))
+        app.add_handler(CommandHandler("status",    self.cmd_status))
+        app.add_handler(CommandHandler("stop",      self.cmd_stop))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message))
         self.app = app
         return app
@@ -181,6 +183,13 @@ class Bot:
         name = await self.state.get_engine(user_id, self.cfg.default_engine)
         return name, self.engines[name]
 
+    async def _memory_id(self, user_id: int) -> str:
+        """Canonical identifier for MCP memory tools.
+
+        Falls back to the numeric Telegram id if the user hasn't set one.
+        """
+        return await self.state.get_memory_id(user_id) or str(user_id)
+
     # ---------- commands ----------
 
     @_authorized
@@ -206,6 +215,7 @@ class Bot:
             "/model — текущая модель\n"
             "/model <name> — сменить модель\n"
             "/system — системный промпт\n"
+            "/memory_id — ID для долговременной памяти\n"
             "/status — что выбрано сейчас\n"
             "/id — узнать user_id и chat_id\n"
             "/help — помощь"
@@ -321,12 +331,71 @@ class Bot:
         )
 
     @_authorized
+    async def cmd_memory_id(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Set/show the canonical identifier used for MCP memory tools.
+
+        By default the numeric Telegram id is used. Setting a name (e.g.
+        ``/memory_id dmitry``) makes the assistant save memories under
+        ``dmitry`` and ``dmitry_private``, matching the convention used in
+        other clients (Open WebUI, Claude Desktop, etc.).
+        """
+        user_id = update.effective_user.id
+        args = ctx.args or []
+
+        if not args:
+            current = await self.state.get_memory_id(user_id)
+            if current:
+                await update.message.reply_text(
+                    f"memory_id: {current}\n"
+                    f"(по умолчанию было бы: {user_id})\n\n"
+                    "Сменить: /memory_id <имя>\n"
+                    "Сбросить: /memory_id reset"
+                )
+            else:
+                await update.message.reply_text(
+                    f"memory_id: {user_id} (по умолчанию, числовой id)\n\n"
+                    "Задать имя: /memory_id dmitry\n"
+                    "Тогда память будет сохраняться как:\n"
+                    "  • dmitry — справочные знания\n"
+                    "  • dmitry_private — личные факты"
+                )
+            return
+
+        if args[0].lower() == "reset":
+            await self.state.clear_memory_id(user_id)
+            await update.message.reply_text(
+                f"✅ memory_id сброшен. Теперь используется числовой id: {user_id}"
+            )
+            return
+
+        new_id = args[0].strip()
+        # Basic sanity: latin letters, digits, underscore, dash, 2-40 chars
+        if not re.fullmatch(r"[A-Za-z0-9_\-]{2,40}", new_id):
+            await update.message.reply_text(
+                "❌ Недопустимый memory_id.\n"
+                "Разрешены: латинские буквы, цифры, _ и -, длина 2–40.\n"
+                "Пример: dmitry, alice, mom_01"
+            )
+            return
+
+        await self.state.set_memory_id(user_id, new_id)
+        await update.message.reply_text(
+            f"✅ memory_id: {new_id}\n\n"
+            "Дальше память будет сохраняться как:\n"
+            f"  • {new_id} — справочные знания\n"
+            f"  • {new_id}_private — личные факты\n\n"
+            "Старые записи под числовым id не удаляются. "
+            "Если хочешь перенести — скажи, дам команду."
+        )
+
+    @_authorized
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         name, engine = await self._current(user_id)
         model = await self.state.get_model(user_id, name) or getattr(engine, "model", "—")
         stateful = "да" if engine.is_stateful() else "нет"
         tools = "да" if engine.supports_tools() else "нет"
+        memory_id = await self._memory_id(user_id)
         if not engine.is_stateful():
             sys_prompt = await self.state.get_system(user_id) or self.cfg.system_prompt
             sys_info = f"Системный промпт: {len(sys_prompt)} символов"
@@ -342,6 +411,7 @@ class Bot:
             f"Stateful: {stateful}\n"
             f"Поддержка инструментов: {tools}\n"
             f"{sys_info}\n"
+            f"memory_id: {memory_id}\n"
             f"История: {len(history)} сообщений (лимит {self.state.history_limit})\n"
             f"MCP: {mcp_info}"
         )
@@ -379,19 +449,21 @@ class Bot:
 
         self._cancelled.discard(user_id)
         name, engine = await self._current(user_id)
+        memory_id = await self._memory_id(user_id)
 
         if engine.supports_tools() and self.mcp and self.mcp.tools:
-            await self._handle_with_tools(msg, user_id, name, engine, text)
+            await self._handle_with_tools(msg, user_id, name, engine, text, memory_id)
         else:
-            await self._handle_simple(msg, user_id, name, engine, text)
+            await self._handle_simple(msg, user_id, name, engine, text, memory_id)
 
     # ---------- simple path ----------
 
-    async def _handle_simple(self, msg, user_id: int, name: str, engine: Engine, text: str):
+    async def _handle_simple(self, msg, user_id: int, name: str, engine: Engine,
+                             text: str, memory_id: str):
         system_prompt: str | None = None
         if not engine.is_stateful():
             system_prompt = await self.state.get_system(user_id) or self.cfg.system_prompt
-            system_prompt = _render_prompt(system_prompt, user_id)
+            system_prompt = _render_prompt(system_prompt, memory_id)
 
         if engine.is_stateful():
             messages = [Message(role="user", content=_stamp_date(text))]
@@ -399,7 +471,6 @@ class Bot:
             history = await self.state.get_history(user_id, name)
             history.append({"role": "user", "content": text})
             messages = [Message(role=m["role"], content=m["content"]) for m in history]
-            # Stamp date only on the last user message (not persisted in history).
             if messages and messages[-1].role == "user":
                 messages[-1] = Message(role="user", content=_stamp_date(messages[-1].content))
             if system_prompt:
@@ -475,18 +546,18 @@ class Bot:
             except Exception:
                 await msg.reply_text(f"❌ Ошибка: {e}")
 
-    # ---------- agent path (with tools) ----------
+    # ---------- agent path ----------
 
-    async def _handle_with_tools(self, msg, user_id: int, name: str, engine: Engine, text: str):
+    async def _handle_with_tools(self, msg, user_id: int, name: str, engine: Engine,
+                                 text: str, memory_id: str):
         system_prompt = await self.state.get_system(user_id) or self.cfg.system_prompt
-        system_prompt = _render_prompt(system_prompt, user_id)
+        system_prompt = _render_prompt(system_prompt, memory_id)
 
         history = await self.state.get_history(user_id, name)
         history.append({"role": "user", "content": text})
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
-        # Stamp date on the last user message (not persisted in history).
         if messages and messages[-1]["role"] == "user":
             messages[-1] = {
                 "role": "user",
