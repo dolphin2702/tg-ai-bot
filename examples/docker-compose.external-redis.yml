@@ -1,0 +1,14 @@
+services:
+  tg-ai-bot:
+    image: ghcr.io/dolphin2702/tg-ai-bot:v0.1.0
+    container_name: tg-ai-bot
+    restart: unless-stopped
+    env_file: .env
+    networks:
+      - external
+    # REDIS_URL и TELEGRAM_TOKEN и т.д. — в .env
+
+networks:
+  external:
+    external: true
+    name: ${EXTERNAL_NETWORK:-mailu_default}

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tg-ai-bot"
+version = "0.1.0"
+description = "Universal Telegram bot for multiple LLM backends"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "dolphin2702" }]
+dependencies = [
+    "python-telegram-bot>=21.0",
+    "httpx>=0.27",
+    "redis>=5.0",
+]
+
+[project.scripts]
+tg-ai-bot = "tg_ai_bot.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tg_ai_bot"]

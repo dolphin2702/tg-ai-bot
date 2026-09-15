@@ -1,0 +1,21 @@
+services:
+  tg-ai-bot:
+    image: ${TG_AI_BOT_IMAGE:-ghcr.io/dolphin2702/tg-ai-bot:v0.1.0}
+    container_name: tg-ai-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    container_name: tg-ai-bot-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    volumes:
+      - tg-ai-bot-redis:/data
+
+volumes:
+  tg-ai-bot-redis:
