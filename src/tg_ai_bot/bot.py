@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime
 from functools import wraps
 
 from telegram import MessageEntity, Update
@@ -73,7 +74,17 @@ def _extract_trigger_prefix(text: str, triggers: list[str]) -> str | None:
 
 
 def _render_prompt(prompt: str, user_id: int) -> str:
-    return prompt.replace("{user_id}", str(user_id))
+    """Substitute placeholders in the system prompt.
+
+    Supported: {user_id}, {date}, {year}.
+    """
+    now = datetime.now()
+    return (
+        prompt
+        .replace("{user_id}", str(user_id))
+        .replace("{date}", now.strftime("%Y-%m-%d"))
+        .replace("{year}", str(now.year))
+    )
 
 
 async def _safe_edit(placeholder, text: str) -> None:
@@ -455,13 +466,7 @@ class Bot:
 
     async def _handle_with_tools(self, msg, user_id: int, name: str, engine: Engine, text: str):
         system_prompt = await self.state.get_system(user_id) or self.cfg.system_prompt
-        def _render_prompt(prompt: str, user_id: int) -> str:
-            from datetime import datetime
-            return (
-                prompt
-                .replace("{user_id}", str(user_id))
-                .replace("{date}", datetime.now().strftime("%Y-%m-%d"))
-            )
+        system_prompt = _render_prompt(system_prompt, user_id)
 
         history = await self.state.get_history(user_id, name)
         history.append({"role": "user", "content": text})

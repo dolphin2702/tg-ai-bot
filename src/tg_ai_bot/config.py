@@ -10,15 +10,31 @@ def _env(key: str, default: str | None = None, required: bool = False) -> str | 
 
 
 DEFAULT_SYSTEM_PROMPT = (
-    "Сегодня {date}. Ты — дружелюбный ассистент в Telegram. Ты бот, работаешь внутри Telegram, "
+    "Сегодня {date}, текущий год — {year}. "
+    "Ты — дружелюбный ассистент в Telegram. Ты бот, работаешь внутри Telegram, "
     "отвечаешь пользователям в личных сообщениях и в групповых чатах. "
     "Не рассуждай о том, кто ты и где находишься — просто отвечай на вопрос. "
     "Отвечай на языке пользователя. Кратко, если вопрос простой.\n\n"
+
     "У тебя есть доступ к инструментам: поиск в интернете (search__*), "
     "долговременная память (memory__*) и кэш (cache__*). Используй их, когда уместно:\n"
     "- поиск — для актуальных данных (погода, новости, курсы, свежие события);\n"
     "- память — чтобы сохранить важные факты о пользователе и найти прошлую информацию;\n"
     "- кэш — для временного хранения промежуточных данных.\n\n"
+
+    "КРИТИЧЕСКИ ВАЖНО при работе с поиском:\n"
+    "- ВСЕГДА указывай текущий год ({year}) в поисковых запросах. "
+    "Например: «погода в СПб 16 сентября {year}», а не «...2024».\n"
+    "- Результаты поиска и загруженные страницы — ЕДИНСТВЕННЫЙ источник "
+    "актуальных данных. Твои внутренние знания о погоде, новостях и курсах "
+    "устарели и не отражают текущую реальность.\n"
+    "- Если в результате поиска есть конкретные цифры (температура, курс, дата) — "
+    "используй ИХ, не подменяй своими догадками и не «округляй».\n"
+    "- Если в результате только заголовок и ссылка (без данных) — вызови "
+    "fetch_article или fetch_web_content для нужного URL, чтобы получить содержимое.\n"
+    "- Если цифр нигде нет — так и скажи: «в результатах поиска нет конкретных данных».\n"
+    "- В ответе указывай источник (URL), откуда взял данные.\n\n"
+
     "Инструменты памяти:\n"
     "- Личные факты о пользователе → user_id = \"{user_id}_private\".\n"
     "- Справочные знания (термины, факты об организациях) → user_id = \"{user_id}\".\n"
@@ -46,14 +62,13 @@ class Config:
     allowed_chats: set[int] = field(default_factory=set)
     group_triggers: list[str] = field(default_factory=list)
     history_limit: int = 50
-    mcp_servers: dict[str, str] = field(default_factory=dict)
     mcp_max_iter: int = 8
-    
+    mcp_servers: dict[str, str] = field(default_factory=dict)
+
 
 def _load_engines() -> dict[str, EngineConfig]:
     engines: dict[str, EngineConfig] = {}
 
-    # OpenAI-compatible engines, comma-separated names.
     names_raw = _env("OPENAI_ENGINES", default="") or ""
     for raw in names_raw.split(","):
         name = raw.strip().upper()
@@ -62,8 +77,6 @@ def _load_engines() -> dict[str, EngineConfig]:
         lower = name.lower()
         base_url = _env(f"{name}_BASE_URL")
         if not base_url:
-            # Not configured — skip silently. User may share .env across
-            # machines where some engines are unavailable.
             continue
         model = _env(f"{name}_MODEL")
         if not model:
@@ -80,7 +93,6 @@ def _load_engines() -> dict[str, EngineConfig]:
             },
         )
 
-    # AnythingLLM (stateful).
     if _env("ANYTHINGLLM_URL"):
         engines["anythingllm"] = EngineConfig(
             name="anythingllm",
@@ -95,20 +107,7 @@ def _load_engines() -> dict[str, EngineConfig]:
     return engines
 
 
-def _load_mcp_servers() -> dict[str, str]:
-    servers: dict[str, str] = {}
-    for key, value in os.environ.items():
-        if not value:
-            continue
-        if key.startswith("MCP_") and key.endswith("_URL"):
-            name = key[4:-4].lower()
-            if name:
-                servers[name] = value
-    return servers
-
-
 def _parse_ids(raw: str | None) -> set[int]:
-    """Parse comma-separated numeric IDs. Negative numbers allowed (chat IDs)."""
     if not raw:
         return set()
     out: set[int] = set()
@@ -123,6 +122,18 @@ def _parse_ids(raw: str | None) -> set[int]:
     return out
 
 
+def _load_mcp_servers() -> dict[str, str]:
+    servers: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if not value:
+            continue
+        if key.startswith("MCP_") and key.endswith("_URL"):
+            name = key[4:-4].lower()
+            if name:
+                servers[name] = value
+    return servers
+
+
 def load_config() -> Config:
     engines = _load_engines()
     if not engines:
@@ -133,9 +144,7 @@ def load_config() -> Config:
     if not default:
         default = next(iter(engines))
     if default not in engines:
-        # Fall back gracefully: default engine is not configured on this host.
         fallback = next(iter(engines))
-        # Warn via stderr; logging may not be set up yet.
         import sys
         print(
             f"WARNING: DEFAULT_ENGINE={default!r} not configured, "
@@ -143,11 +152,14 @@ def load_config() -> Config:
             file=sys.stderr,
         )
         default = fallback
-    triggers_raw = _env("GROUP_TRIGGERS", default="ИИ,AI,бот,bot") or ""
+
+    triggers_raw = _env("GROUP_TRIGGERS", default="ии,ai,бот,помощник") or ""
     group_triggers = [t.strip().lower() for t in triggers_raw.split(",") if t.strip()]
+
     history_limit = int(_env("HISTORY_LIMIT", default="50") or "50")
-    mcp_servers = _load_mcp_servers()
     mcp_max_iter = int(_env("MCP_MAX_ITER", default="8") or "8")
+    mcp_servers = _load_mcp_servers()
+
     return Config(
         telegram_token=_env("TELEGRAM_TOKEN", required=True),
         redis_url=_env("REDIS_URL"),
@@ -159,5 +171,6 @@ def load_config() -> Config:
         allowed_chats=_parse_ids(_env("ALLOWED_CHATS")),
         group_triggers=group_triggers,
         history_limit=history_limit,
+        mcp_max_iter=mcp_max_iter,
         mcp_servers=mcp_servers,
     )
