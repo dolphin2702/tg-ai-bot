@@ -4,7 +4,6 @@ services:
     container_name: tg-ai-bot
     restart: unless-stopped
     env_file: .env
-	HISTORY_LIMIT=50
     networks:
       - external
     # REDIS_URL и TELEGRAM_TOKEN и т.д. — в .env
