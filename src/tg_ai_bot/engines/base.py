@@ -29,6 +29,6 @@ class Engine(ABC):
         """True if the backend keeps history server-side (AnythingLLM)."""
         return False
 
-    async def new_thread(self) -> str | None:
+    async def new_thread(self, name: str | None = None) -> str | None:
         """Create a server-side thread. Only meaningful for stateful engines."""
         return None

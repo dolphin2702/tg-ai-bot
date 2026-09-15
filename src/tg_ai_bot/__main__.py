@@ -17,7 +17,7 @@ def main() -> None:
 
     cfg = load_config()
     engines = {name: build_engine(ec) for name, ec in cfg.engines.items()}
-    state = State(cfg.redis_url)
+    state = State(cfg.redis_url, history_limit=cfg.history_limit)
     bot = Bot(cfg, state, engines)
     app = bot.build()
 

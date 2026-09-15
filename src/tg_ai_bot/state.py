@@ -11,7 +11,8 @@ class State:
     Keys are namespaced under ``tgbot:``.
     """
 
-    def __init__(self, url: str | None):
+    def __init__(self, url: str | None, history_limit: int = 50):
+        self.history_limit = history_limit
         if url:
             if redis is None:
                 raise RuntimeError("redis package not installed but REDIS_URL is set")
@@ -81,9 +82,13 @@ class State:
         await self._del(f"tgbot:user:{user_id}:thread:{engine}")
 
     # ---- local history ----
-    async def get_history(self, user_id: int, engine: str) -> list[dict]:
-        raw = await self._get(f"tgbot:user:{user_id}:history:{engine}")
-        return json.loads(raw) if raw else []
+    async def set_history(self, user_id: int, engine: str, messages: list[dict]) -> None:
+        if self.history_limit and len(messages) > self.history_limit:
+            messages = messages[-self.history_limit:]
+        await self._set(
+            f"tgbot:user:{user_id}:history:{engine}",
+            json.dumps(messages),
+        )
 
     async def set_history(self, user_id: int, engine: str, messages: list[dict]) -> None:
         await self._set(

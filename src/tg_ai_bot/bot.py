@@ -28,12 +28,6 @@ def _strip_tags(s: str) -> str:
     return "\n".join(line for line in s.splitlines() if line.strip())
 
 
-def _chunk(text: str, size: int = TG_LIMIT) -> list[str]:
-    if not text:
-        return [""]
-    return [text[i:i + size] for i in range(0, len(text), size)]
-
-
 def _is_reply_to_bot(update: Update, bot_id: int) -> bool:
     msg = update.message
     reply = msg.reply_to_message if msg else None
@@ -43,7 +37,6 @@ def _is_reply_to_bot(update: Update, bot_id: int) -> bool:
 
 
 def _has_mention_of(update: Update, username: str) -> bool:
-    """Check if the message mentions @username."""
     msg = update.message
     if not msg or not msg.entities or not msg.text:
         return False
@@ -60,16 +53,6 @@ def _has_mention_of(update: Update, username: str) -> bool:
 
 
 def _extract_trigger_prefix(text: str, triggers: list[str]) -> str | None:
-    """If ``text`` starts with one of ``triggers`` (case-insensitive) followed
-    by a separator, return the remainder. Otherwise return None.
-
-    Examples (triggers = ["ии", "бот"]):
-        "ИИ, какая погода"      -> "какая погода"
-        "бот: помоги"           -> "помоги"
-        "ИИ"                    -> ""
-        "иИИИ"                  -> None   (not a word boundary)
-        "Просто текст"          -> None
-    """
     if not text:
         return None
     stripped = text.lstrip()
@@ -82,14 +65,12 @@ def _extract_trigger_prefix(text: str, triggers: list[str]) -> str | None:
         rest = stripped[len(trig):]
         if not rest:
             return ""
-        # require a separator right after the trigger
         if rest[0] in " ,:;—–-.!?":
             return rest.lstrip(" ,:;—–-.!?")
     return None
 
 
 def _authorized(fn):
-    """Reject users/chats not authorized by config or seen in allowed groups."""
     @wraps(fn)
     async def wrapper(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not await self._is_allowed(update):
@@ -112,6 +93,7 @@ class Bot:
         self.app: Application | None = None
         self._bot_id: int | None = None
         self._bot_username: str | None = None
+        self._cancelled: set[int] = set()
 
     # ---------- setup ----------
 
@@ -125,6 +107,7 @@ class Bot:
         app.add_handler(CommandHandler("model",  self.cmd_model))
         app.add_handler(CommandHandler("system", self.cmd_system))
         app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("stop",   self.cmd_stop))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message))
         self.app = app
         return app
@@ -138,21 +121,17 @@ class Bot:
     # ---------- access control ----------
 
     async def _is_allowed(self, update: Update) -> bool:
-        # Dev mode: no restrictions configured
         if not self.cfg.allowed_users and not self.cfg.allowed_chats:
             return True
         user = update.effective_user
         chat = update.effective_chat
         if not user or not chat:
             return False
-        # In an allowed group: allow and remember the user for private chats.
         if chat.id in self.cfg.allowed_chats:
             await self.state.mark_known(user.id)
             return True
-        # Explicit user allow list (private chats)
         if user.id in self.cfg.allowed_users:
             return True
-        # Users seen before in an allowed group
         if await self.state.is_known(user.id):
             return True
         return False
@@ -177,6 +156,7 @@ class Bot:
             "Например: «ИИ, какая погода в Самаре»\n\n"
             "Команды:\n"
             "/new — новый диалог\n"
+            "/stop — остановить генерацию\n"
             "/engine — список движков\n"
             "/engine <name> — переключить движок\n"
             "/model — текущая модель\n"
@@ -202,6 +182,12 @@ class Bot:
         )
 
     @_authorized
+    async def cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        self._cancelled.add(user_id)
+        await update.message.reply_text("⏹️ Останавливаю…")
+
+    @_authorized
     async def cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         name, engine = await self._current(user_id)
@@ -209,7 +195,7 @@ class Bot:
         if engine.is_stateful():
             await self.state.clear_thread(user_id, name)
             try:
-                tid = await engine.new_thread()
+                tid = await engine.new_thread(name=f"tg_{user_id}")
                 if tid:
                     await self.state.set_thread(user_id, name, tid)
             except Exception as e:
@@ -298,11 +284,13 @@ class Bot:
             sys_info = f"Системный промпт: {len(sys_prompt)} символов"
         else:
             sys_info = "Системный промпт: управляется движком"
+        history = await self.state.get_history(user_id, name)
         await update.message.reply_text(
             f"Движок: {name}\n"
             f"Модель: {model}\n"
             f"Stateful: {stateful}\n"
-            f"{sys_info}"
+            f"{sys_info}\n"
+            f"История: {len(history)} сообщений (лимит {self.state.history_limit})"
         )
 
     # ---------- message handler ----------
@@ -319,34 +307,33 @@ class Bot:
         text = msg.text or ""
         is_group = chat.type in ("group", "supergroup")
 
-        # In groups, only respond when directly addressed.
         if is_group:
             mentioned = _has_mention_of(update, self._bot_username or "")
             reply_to_bot = _is_reply_to_bot(update, self._bot_id or 0)
             stripped = _extract_trigger_prefix(text, self.cfg.group_triggers)
 
             if not (mentioned or reply_to_bot or stripped is not None):
-                return  # stay silent
+                return
 
             if stripped is not None:
                 text = stripped
             elif mentioned:
                 tag = f"@{self._bot_username}"
                 text = re.sub(re.escape(tag), "", text, flags=re.IGNORECASE).strip()
-            # if it was just a reply with no text, keep original text
 
             if not text:
                 return
 
+        # Reset cancellation for this user
+        self._cancelled.discard(user_id)
+
         name, engine = await self._current(user_id)
 
-        # System prompt applies only to stateless engines.
         system_prompt: str | None = None
         if not engine.is_stateful():
             system_prompt = await self.state.get_system(user_id) or self.cfg.system_prompt
 
         if engine.is_stateful():
-            # Stateful backends keep history server-side; send only the new message.
             messages = [Message(role="user", content=text)]
         else:
             history = await self.state.get_history(user_id, name)
@@ -360,7 +347,7 @@ class Bot:
             thread_id = await self.state.get_thread(user_id, name)
             if not thread_id:
                 try:
-                    thread_id = await engine.new_thread()
+                    thread_id = await engine.new_thread(name=f"tg_{user_id}")
                     if thread_id:
                         await self.state.set_thread(user_id, name, thread_id)
                 except Exception as e:
@@ -369,35 +356,63 @@ class Bot:
 
         model = await self.state.get_model(user_id, name)
 
-        placeholder = await msg.reply_text("…")
         buffer = ""
+        consumed = 0
+        placeholder = await msg.reply_text("…")
         last_edit = 0.0
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         try:
             async for chunk in engine.chat(messages, thread_id=thread_id, model=model):
+                if user_id in self._cancelled:
+                    self._cancelled.discard(user_id)
+                    tail = _strip_tags(buffer[consumed:]).strip()
+                    if tail:
+                        try:
+                            await placeholder.edit_text(tail + "\n\n⏹️ (остановлено)")
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            await placeholder.edit_text("⏹️ Остановлено")
+                        except Exception:
+                            pass
+                    return
+
                 buffer += chunk
-                now = loop.time()
-                if now - last_edit >= EDIT_THROTTLE and len(buffer) <= TG_LIMIT:
+
+                # Handle overflow: freeze current placeholder, start a new one
+                while len(buffer) - consumed > TG_LIMIT:
+                    head = _strip_tags(buffer[consumed:consumed + TG_LIMIT]).strip()
                     try:
-                        await placeholder.edit_text(buffer or "…")
+                        await placeholder.edit_text(head or "…")
+                    except Exception:
+                        pass
+                    consumed += TG_LIMIT
+                    placeholder = await msg.reply_text("…")
+
+                # Throttled live update of the current placeholder
+                now = loop.time()
+                if now - last_edit >= EDIT_THROTTLE:
+                    tail = _strip_tags(buffer[consumed:]).strip() or "…"
+                    try:
+                        await placeholder.edit_text(tail)
                     except Exception:
                         pass
                     last_edit = now
 
-            final = _strip_tags(buffer).strip() or "(пустой ответ)"
-
-            if not engine.is_stateful():
-                history.append({"role": "assistant", "content": final})
-                await self.state.set_history(user_id, name, history)
-
-            parts = _chunk(final)
+            # Final update
+            tail = _strip_tags(buffer[consumed:]).strip()
             try:
-                await placeholder.edit_text(parts[0])
+                await placeholder.edit_text(tail or "(пустой ответ)")
             except Exception:
-                await msg.reply_text(parts[0])
-            for extra in parts[1:]:
-                await msg.reply_text(extra)
+                await msg.reply_text(tail or "(пустой ответ)")
+
+            # Persist history for stateless engines
+            if not engine.is_stateful():
+                full = _strip_tags(buffer).strip()
+                history.append({"role": "assistant", "content": full})
+                await self.state.set_history(user_id, name, history)
 
         except Exception as e:
             log.exception("engine.chat failed")

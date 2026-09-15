@@ -24,12 +24,12 @@ class AnythingLLMEngine(Engine):
             "Content-Type": "application/json",
         }
 
-    async def new_thread(self) -> str | None:
+    async def new_thread(self, name: str | None = None) -> str | None:
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(
                 f"{self.url}/api/v1/workspace/{self.workspace}/thread/new",
                 headers=self._headers(),
-                json={"name": "tgbot"},
+                json={"name": name or "tgbot"},
             )
             r.raise_for_status()
             data = r.json()
