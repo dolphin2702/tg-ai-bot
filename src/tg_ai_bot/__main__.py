@@ -21,14 +21,14 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # HTTP request logging — useful for debugging, noisy in production.
+    logging.getLogger("httpx").setLevel(logging.INFO)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     cfg = load_config()
     engines = {name: build_engine(ec) for name, ec in cfg.engines.items()}
     state = State(cfg.redis_url, history_limit=cfg.history_limit)
 
-    # Load MCP tools before building the bot.
     mcp = asyncio.run(_load_mcp(cfg))
     if mcp:
         logging.info("MCP servers: %s", list(cfg.mcp_servers))

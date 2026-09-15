@@ -523,10 +523,12 @@ class Bot:
 
                 for i, tc in enumerate(collected_tool_calls):
                     call_id = tc["id"] or f"call_{i}"
+                    log.info("TOOL CALL: %s(%s)", tc["name"], tc["arguments"])
                     try:
                         result = await self.mcp.call(tc["name"], tc["arguments"])
                     except Exception as e:
                         result = f"ERROR: {e}"
+                    log.info("TOOL RESULT (%d chars): %s", len(result), result[:500])
                     if len(result) > 8000:
                         result = result[:8000] + "\n…(truncated)"
                     messages.append({
