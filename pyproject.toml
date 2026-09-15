@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tg-ai-bot"
-version = "0.1.2"
+version = "0.1.3"
 description = "Universal Telegram bot for multiple LLM backends"
 readme = "README.md"
 requires-python = ">=3.11"
