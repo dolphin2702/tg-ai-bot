@@ -188,6 +188,9 @@ class MCPRegistry:
 
     async def load(self) -> None:
         """Open sessions and fetch tool lists from every configured server."""
+        if self.sessions:
+            log.warning("MCP registry already loaded, skipping")
+            return
         self.tools = []
         for name, url in self.servers.items():
             session = MCPServerSession(name, url)
