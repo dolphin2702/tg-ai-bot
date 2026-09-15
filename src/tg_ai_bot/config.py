@@ -42,13 +42,23 @@ def _load_engines() -> dict[str, EngineConfig]:
         if not name:
             continue
         lower = name.lower()
+        base_url = _env(f"{name}_BASE_URL")
+        if not base_url:
+            # Not configured — skip silently. User may share .env across
+            # machines where some engines are unavailable.
+            continue
+        model = _env(f"{name}_MODEL")
+        if not model:
+            raise RuntimeError(
+                f"{name}_BASE_URL is set but {name}_MODEL is missing"
+            )
         engines[lower] = EngineConfig(
             name=lower,
             type="openai_compat",
             params={
-                "base_url": _env(f"{name}_BASE_URL", required=True),
+                "base_url": base_url,
                 "api_key": _env(f"{name}_API_KEY", default="not-needed"),
-                "model": _env(f"{name}_MODEL", required=True),
+                "model": model,
             },
         )
 
@@ -89,11 +99,20 @@ def load_config() -> Config:
         raise RuntimeError(
             "No engines configured. Set OPENAI_ENGINES and/or ANYTHINGLLM_URL."
         )
-    default = _env("DEFAULT_ENGINE", default=next(iter(engines)))
+    default = _env("DEFAULT_ENGINE")
+    if not default:
+        default = next(iter(engines))
     if default not in engines:
-        raise RuntimeError(
-            f"DEFAULT_ENGINE={default!r} not in configured engines: {list(engines)}"
+        # Fall back gracefully: default engine is not configured on this host.
+        fallback = next(iter(engines))
+        # Warn via stderr; logging may not be set up yet.
+        import sys
+        print(
+            f"WARNING: DEFAULT_ENGINE={default!r} not configured, "
+            f"falling back to {fallback!r}",
+            file=sys.stderr,
         )
+        default = fallback
     return Config(
         telegram_token=_env("TELEGRAM_TOKEN", required=True),
         redis_url=_env("REDIS_URL"),
