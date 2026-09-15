@@ -17,6 +17,9 @@ class AnythingLLMEngine(Engine):
 
     def is_stateful(self) -> bool:
         return True
+    
+    def supports_tools(self) -> bool:
+        return False
 
     def _headers(self) -> dict:
         return {

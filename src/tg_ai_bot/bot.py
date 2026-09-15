@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 from functools import wraps
@@ -14,6 +15,7 @@ from telegram.ext import (
 
 from .config import Config
 from .engines import Engine, Message
+from .mcp import MCPRegistry
 from .state import State
 
 log = logging.getLogger(__name__)
@@ -70,6 +72,17 @@ def _extract_trigger_prefix(text: str, triggers: list[str]) -> str | None:
     return None
 
 
+def _render_prompt(prompt: str, user_id: int) -> str:
+    return prompt.replace("{user_id}", str(user_id))
+
+
+async def _safe_edit(placeholder, text: str) -> None:
+    try:
+        await placeholder.edit_text(text or "…")
+    except Exception:
+        pass
+
+
 def _authorized(fn):
     @wraps(fn)
     async def wrapper(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -86,10 +99,17 @@ def _authorized(fn):
 
 
 class Bot:
-    def __init__(self, cfg: Config, state: State, engines: dict[str, Engine]):
+    def __init__(
+        self,
+        cfg: Config,
+        state: State,
+        engines: dict[str, Engine],
+        mcp: MCPRegistry | None = None,
+    ):
         self.cfg = cfg
         self.state = state
         self.engines = engines
+        self.mcp = mcp
         self.app: Application | None = None
         self._bot_id: int | None = None
         self._bot_username: str | None = None
@@ -146,14 +166,17 @@ class Bot:
     async def cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await self._ensure_bot_info()
         triggers = ", ".join(self.cfg.group_triggers) if self.cfg.group_triggers else "—"
+        tools_info = ""
+        if self.mcp and self.mcp.tools:
+            tools_info = f"\nИнструментов доступно: {len(self.mcp.tools)}\n"
         await update.message.reply_text(
             "Привет! Я универсальный LLM-бот.\n\n"
             "В личке отвечаю на всё.\n"
             "В группе — только когда обращаются:\n"
             f"  • упоминание @{self._bot_username}\n"
             "  • ответ на моё сообщение\n"
-            f"  • или префикс: {triggers}\n\n"
-            "Например: «ИИ, какая погода в Самаре»\n\n"
+            f"  • или префикс: {triggers}\n"
+            f"{tools_info}\n"
             "Команды:\n"
             "/new — новый диалог\n"
             "/stop — остановить генерацию\n"
@@ -211,9 +234,12 @@ class Bot:
             cur, _ = await self._current(user_id)
             lines = ["Доступные движки:"]
             for name in self.engines:
+                engine = self.engines[name]
+                tool_mark = " 🛠️" if engine.supports_tools() else ""
                 marker = "▶️" if name == cur else "  "
-                lines.append(f"{marker} {name}")
+                lines.append(f"{marker} {name}{tool_mark}")
             lines.append("\nПереключить: /engine <name>")
+            lines.append("🛠️ = поддерживает инструменты (MCP)")
             await update.message.reply_text("\n".join(lines))
             return
         name = args[0].lower()
@@ -279,18 +305,24 @@ class Bot:
         name, engine = await self._current(user_id)
         model = await self.state.get_model(user_id, name) or getattr(engine, "model", "—")
         stateful = "да" if engine.is_stateful() else "нет"
+        tools = "да" if engine.supports_tools() else "нет"
         if not engine.is_stateful():
             sys_prompt = await self.state.get_system(user_id) or self.cfg.system_prompt
             sys_info = f"Системный промпт: {len(sys_prompt)} символов"
         else:
             sys_info = "Системный промпт: управляется движком"
         history = await self.state.get_history(user_id, name)
+        mcp_info = "—"
+        if self.mcp and self.mcp.tools:
+            mcp_info = f"{len(self.mcp.tools)} инструментов"
         await update.message.reply_text(
             f"Движок: {name}\n"
             f"Модель: {model}\n"
             f"Stateful: {stateful}\n"
+            f"Поддержка инструментов: {tools}\n"
             f"{sys_info}\n"
-            f"История: {len(history)} сообщений (лимит {self.state.history_limit})"
+            f"История: {len(history)} сообщений (лимит {self.state.history_limit})\n"
+            f"MCP: {mcp_info}"
         )
 
     # ---------- message handler ----------
@@ -324,14 +356,21 @@ class Bot:
             if not text:
                 return
 
-        # Reset cancellation for this user
         self._cancelled.discard(user_id)
-
         name, engine = await self._current(user_id)
 
+        if engine.supports_tools() and self.mcp and self.mcp.tools:
+            await self._handle_with_tools(msg, user_id, name, engine, text)
+        else:
+            await self._handle_simple(msg, user_id, name, engine, text)
+
+    # ---------- simple path ----------
+
+    async def _handle_simple(self, msg, user_id: int, name: str, engine: Engine, text: str):
         system_prompt: str | None = None
         if not engine.is_stateful():
             system_prompt = await self.state.get_system(user_id) or self.cfg.system_prompt
+            system_prompt = _render_prompt(system_prompt, user_id)
 
         if engine.is_stateful():
             messages = [Message(role="user", content=text)]
@@ -367,21 +406,14 @@ class Bot:
                 if user_id in self._cancelled:
                     self._cancelled.discard(user_id)
                     tail = _strip_tags(buffer[consumed:]).strip()
-                    if tail:
-                        try:
-                            await placeholder.edit_text(tail + "\n\n⏹️ (остановлено)")
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            await placeholder.edit_text("⏹️ Остановлено")
-                        except Exception:
-                            pass
+                    await _safe_edit(
+                        placeholder,
+                        (tail + "\n\n⏹️ (остановлено)") if tail else "⏹️ Остановлено",
+                    )
                     return
 
                 buffer += chunk
 
-                # Handle overflow: freeze current placeholder, start a new one
                 while len(buffer) - consumed > TG_LIMIT:
                     head = _strip_tags(buffer[consumed:consumed + TG_LIMIT]).strip()
                     try:
@@ -391,7 +423,6 @@ class Bot:
                     consumed += TG_LIMIT
                     placeholder = await msg.reply_text("…")
 
-                # Throttled live update of the current placeholder
                 now = loop.time()
                 if now - last_edit >= EDIT_THROTTLE:
                     tail = _strip_tags(buffer[consumed:]).strip() or "…"
@@ -401,21 +432,133 @@ class Bot:
                         pass
                     last_edit = now
 
-            # Final update
             tail = _strip_tags(buffer[consumed:]).strip()
             try:
                 await placeholder.edit_text(tail or "(пустой ответ)")
             except Exception:
                 await msg.reply_text(tail or "(пустой ответ)")
 
-            # Persist history for stateless engines
             if not engine.is_stateful():
                 full = _strip_tags(buffer).strip()
+                history = await self.state.get_history(user_id, name)
                 history.append({"role": "assistant", "content": full})
                 await self.state.set_history(user_id, name, history)
 
         except Exception as e:
             log.exception("engine.chat failed")
+            try:
+                await placeholder.edit_text(f"❌ Ошибка: {e}")
+            except Exception:
+                await msg.reply_text(f"❌ Ошибка: {e}")
+
+    # ---------- agent path (with tools) ----------
+
+    async def _handle_with_tools(self, msg, user_id: int, name: str, engine: Engine, text: str):
+        system_prompt = await self.state.get_system(user_id) or self.cfg.system_prompt
+        system_prompt = _render_prompt(system_prompt, user_id)
+
+        history = await self.state.get_history(user_id, name)
+        history.append({"role": "user", "content": text})
+
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+
+        model = await self.state.get_model(user_id, name)
+        tools = self.mcp.openai_tools()
+
+        placeholder = await msg.reply_text("…")
+        last_edit = 0.0
+        loop = asyncio.get_running_loop()
+        final_text = ""
+        text_buffer = ""
+
+        try:
+            for iteration in range(self.cfg.mcp_max_iter):
+                collected_tool_calls: list[dict] = []
+                text_buffer = ""
+
+                async for event in engine.chat_with_tools(messages, tools=tools, model=model):
+                    if user_id in self._cancelled:
+                        self._cancelled.discard(user_id)
+                        await _safe_edit(placeholder, "⏹️ Остановлено")
+                        return
+
+                    if event["type"] == "text":
+                        text_buffer += event["delta"]
+                        now = loop.time()
+                        if now - last_edit >= EDIT_THROTTLE:
+                            try:
+                                await placeholder.edit_text(text_buffer or "…")
+                            except Exception:
+                                pass
+                            last_edit = now
+
+                    elif event["type"] == "tool_call":
+                        collected_tool_calls.append(event)
+                        try:
+                            await placeholder.edit_text(f"🛠️ {event['name']}…")
+                        except Exception:
+                            pass
+
+                if not collected_tool_calls:
+                    final_text = _strip_tags(text_buffer).strip() or "(пустой ответ)"
+                    break
+
+                assistant_msg: dict = {
+                    "role": "assistant",
+                    "content": text_buffer or None,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"] or f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": json.dumps(tc["arguments"], ensure_ascii=False),
+                            },
+                        }
+                        for i, tc in enumerate(collected_tool_calls)
+                    ],
+                }
+                messages.append(assistant_msg)
+
+                for i, tc in enumerate(collected_tool_calls):
+                    call_id = tc["id"] or f"call_{i}"
+                    try:
+                        result = await self.mcp.call(tc["name"], tc["arguments"])
+                    except Exception as e:
+                        result = f"ERROR: {e}"
+                    if len(result) > 8000:
+                        result = result[:8000] + "\n…(truncated)"
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": result,
+                    })
+
+                try:
+                    await placeholder.edit_text("…")
+                except Exception:
+                    pass
+                last_edit = 0.0
+            else:
+                final_text = (text_buffer or "").strip() or "(превышен лимит итераций)"
+
+            final_text = final_text or "(пустой ответ)"
+            try:
+                await placeholder.edit_text(final_text[:TG_LIMIT])
+            except Exception:
+                await msg.reply_text(final_text[:TG_LIMIT])
+            if len(final_text) > TG_LIMIT:
+                parts = [final_text[i:i + TG_LIMIT]
+                         for i in range(TG_LIMIT, len(final_text), TG_LIMIT)]
+                for part in parts:
+                    await msg.reply_text(part)
+
+            history.append({"role": "assistant", "content": final_text})
+            await self.state.set_history(user_id, name, history)
+
+        except Exception as e:
+            log.exception("agent loop failed")
             try:
                 await placeholder.edit_text(f"❌ Ошибка: {e}")
             except Exception:

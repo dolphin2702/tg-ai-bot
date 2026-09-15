@@ -22,7 +22,7 @@ class Engine(ABC):
         thread_id: str | None = None,
         model: str | None = None,
     ) -> AsyncIterator[str]:
-        """Yield text chunks. Raise on error."""
+        """Plain chat, yield text chunks. Raise on error."""
         ...
 
     def is_stateful(self) -> bool:
@@ -32,3 +32,23 @@ class Engine(ABC):
     async def new_thread(self, name: str | None = None) -> str | None:
         """Create a server-side thread. Only meaningful for stateful engines."""
         return None
+
+    def supports_tools(self) -> bool:
+        """Whether this engine can call OpenAI-style tools."""
+        return False
+
+    async def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        model: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """Agent mode. Only used if ``supports_tools()`` is True.
+
+        Yields events:
+            {"type": "text", "delta": "..."}
+            {"type": "tool_call", "id": "...", "name": "...", "arguments": {...}}
+        """
+        raise NotImplementedError
+        yield  # noqa: pragma: no cover — make this an async generator

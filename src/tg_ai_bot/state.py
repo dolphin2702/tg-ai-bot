@@ -71,7 +71,7 @@ class State:
     async def clear_system(self, user_id: int) -> None:
         await self._del(f"tgbot:user:{user_id}:system")
 
-    # ---- thread id ----
+    # ---- thread id (stateful engines) ----
     async def get_thread(self, user_id: int, engine: str) -> str | None:
         return await self._get(f"tgbot:user:{user_id}:thread:{engine}")
 
@@ -81,7 +81,11 @@ class State:
     async def clear_thread(self, user_id: int, engine: str) -> None:
         await self._del(f"tgbot:user:{user_id}:thread:{engine}")
 
-    # ---- local history ----
+    # ---- local history (stateless engines) ----
+    async def get_history(self, user_id: int, engine: str) -> list[dict]:
+        raw = await self._get(f"tgbot:user:{user_id}:history:{engine}")
+        return json.loads(raw) if raw else []
+
     async def set_history(self, user_id: int, engine: str, messages: list[dict]) -> None:
         if self.history_limit and len(messages) > self.history_limit:
             messages = messages[-self.history_limit:]
@@ -90,15 +94,9 @@ class State:
             json.dumps(messages),
         )
 
-    async def set_history(self, user_id: int, engine: str, messages: list[dict]) -> None:
-        await self._set(
-            f"tgbot:user:{user_id}:history:{engine}",
-            json.dumps(messages),
-        )
-
     async def clear_history(self, user_id: int, engine: str) -> None:
         await self._del(f"tgbot:user:{user_id}:history:{engine}")
-        
+
     # ---- known users (auto-added when they speak in an allowed group) ----
     async def mark_known(self, user_id: int) -> None:
         await self._set(f"tgbot:known:{user_id}", "1")

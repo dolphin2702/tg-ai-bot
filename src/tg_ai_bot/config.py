@@ -10,7 +10,21 @@ def _env(key: str, default: str | None = None, required: bool = False) -> str | 
 
 
 DEFAULT_SYSTEM_PROMPT = (
-    "Ты — полезный ассистент. Отвечай чётко, по делу, на языке пользователя."
+    "Ты — дружелюбный ассистент в Telegram. Ты бот, работаешь внутри Telegram, "
+    "отвечаешь пользователям в личных сообщениях и в групповых чатах. "
+    "Не рассуждай о том, кто ты и где находишься — просто отвечай на вопрос. "
+    "Отвечай на языке пользователя. Кратко, если вопрос простой.\n\n"
+    "У тебя есть доступ к инструментам: поиск в интернете (search__*), "
+    "долговременная память (memory__*) и кэш (cache__*). Используй их, когда уместно:\n"
+    "- поиск — для актуальных данных (погода, новости, курсы, свежие события);\n"
+    "- память — чтобы сохранить важные факты о пользователе и найти прошлую информацию;\n"
+    "- кэш — для временного хранения промежуточных данных.\n\n"
+    "Инструменты памяти:\n"
+    "- Личные факты о пользователе → user_id = \"{user_id}_private\".\n"
+    "- Справочные знания (термины, факты об организациях) → user_id = \"{user_id}\".\n"
+    "- При противоречии: сначала search_memory, потом delete_memories, потом add_memories.\n"
+    "- Ищи в памяти автоматически в начале диалога и при отсылках к прошлому.\n"
+    "- Подтверждай запись только в конце ответа: «(Запомнил: …)»."
 )
 
 
@@ -32,6 +46,8 @@ class Config:
     allowed_chats: set[int] = field(default_factory=set)
     group_triggers: list[str] = field(default_factory=list)
     history_limit: int = 50
+    mcp_servers: dict[str, str] = field(default_factory=dict)
+    mcp_max_iter: int = 8
     
 
 def _load_engines() -> dict[str, EngineConfig]:
@@ -79,6 +95,18 @@ def _load_engines() -> dict[str, EngineConfig]:
     return engines
 
 
+def _load_mcp_servers() -> dict[str, str]:
+    servers: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if not value:
+            continue
+        if key.startswith("MCP_") and key.endswith("_URL"):
+            name = key[4:-4].lower()
+            if name:
+                servers[name] = value
+    return servers
+
+
 def _parse_ids(raw: str | None) -> set[int]:
     """Parse comma-separated numeric IDs. Negative numbers allowed (chat IDs)."""
     if not raw:
@@ -118,6 +146,8 @@ def load_config() -> Config:
     triggers_raw = _env("GROUP_TRIGGERS", default="ИИ,AI,бот,bot") or ""
     group_triggers = [t.strip().lower() for t in triggers_raw.split(",") if t.strip()]
     history_limit = int(_env("HISTORY_LIMIT", default="50") or "50")
+    mcp_servers = _load_mcp_servers()
+    mcp_max_iter = int(_env("MCP_MAX_ITER", default="8") or "8")
     return Config(
         telegram_token=_env("TELEGRAM_TOKEN", required=True),
         redis_url=_env("REDIS_URL"),
@@ -129,4 +159,5 @@ def load_config() -> Config:
         allowed_chats=_parse_ids(_env("ALLOWED_CHATS")),
         group_triggers=group_triggers,
         history_limit=history_limit,
+        mcp_servers=mcp_servers,
     )
