@@ -24,6 +24,12 @@ log = logging.getLogger(__name__)
 EDIT_THROTTLE = 1.0
 TG_LIMIT = 4000
 
+# Tools that the LLM must not see. Deletion is available only via /forget.
+FORBIDDEN_TOOLS_FOR_LLM = {
+    "memory__delete_memories",
+    "memory__delete_all_memories",
+}
+
 
 def _strip_tags(s: str) -> str:
     s = re.sub(r"<[^>]+>", "", s)
@@ -73,12 +79,6 @@ def _extract_trigger_prefix(text: str, triggers: list[str]) -> str | None:
 
 
 def _render_prompt(prompt: str, memory_id: str) -> str:
-    """Substitute placeholders in the system prompt.
-
-    ``memory_id`` is the user-facing identifier used for MCP memory tools.
-    For a Telegram user it may be the numeric id (default) or a custom
-    name set via ``/memory_id`` (e.g. "dmitry").
-    """
     now = datetime.now()
     return (
         prompt
@@ -149,6 +149,8 @@ class Bot:
         app.add_handler(CommandHandler("model",     self.cmd_model))
         app.add_handler(CommandHandler("system",    self.cmd_system))
         app.add_handler(CommandHandler("memory_id", self.cmd_memory_id))
+        app.add_handler(CommandHandler("forget",    self.cmd_forget))
+        app.add_handler(CommandHandler("restore",   self.cmd_restore))
         app.add_handler(CommandHandler("status",    self.cmd_status))
         app.add_handler(CommandHandler("stop",      self.cmd_stop))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message))
@@ -184,10 +186,6 @@ class Bot:
         return name, self.engines[name]
 
     async def _memory_id(self, user_id: int) -> str:
-        """Canonical identifier for MCP memory tools.
-
-        Falls back to the numeric Telegram id if the user hasn't set one.
-        """
         return await self.state.get_memory_id(user_id) or str(user_id)
 
     # ---------- commands ----------
@@ -216,6 +214,8 @@ class Bot:
             "/model <name> — сменить модель\n"
             "/system — системный промпт\n"
             "/memory_id — ID для долговременной памяти\n"
+            "/forget — управление памятью (list / <id> / all)\n"
+            "/restore <id> — восстановить удалённую запись\n"
             "/status — что выбрано сейчас\n"
             "/id — узнать user_id и chat_id\n"
             "/help — помощь"
@@ -332,13 +332,6 @@ class Bot:
 
     @_authorized
     async def cmd_memory_id(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Set/show the canonical identifier used for MCP memory tools.
-
-        By default the numeric Telegram id is used. Setting a name (e.g.
-        ``/memory_id dmitry``) makes the assistant save memories under
-        ``dmitry`` and ``dmitry_private``, matching the convention used in
-        other clients (Open WebUI, Claude Desktop, etc.).
-        """
         user_id = update.effective_user.id
         args = ctx.args or []
 
@@ -369,7 +362,6 @@ class Bot:
             return
 
         new_id = args[0].strip()
-        # Basic sanity: latin letters, digits, underscore, dash, 2-40 chars
         if not re.fullmatch(r"[A-Za-z0-9_\-]{2,40}", new_id):
             await update.message.reply_text(
                 "❌ Недопустимый memory_id.\n"
@@ -383,9 +375,116 @@ class Bot:
             f"✅ memory_id: {new_id}\n\n"
             "Дальше память будет сохраняться как:\n"
             f"  • {new_id} — справочные знания\n"
-            f"  • {new_id}_private — личные факты\n\n"
-            "Старые записи под числовым id не удаляются. "
-            "Если хочешь перенести — скажи, дам команду."
+            f"  • {new_id}_private — личные факты"
+        )
+
+    # ---------- memory management (manual, not via LLM) ----------
+
+    async def _memory_call(self, tool: str, args: dict) -> str:
+        """Direct MCP call to memory tools, bypassing the LLM."""
+        if not self.mcp:
+            return "ERROR: MCP not available"
+        full_name = f"memory__{tool}"
+        t = self.mcp.find(full_name)
+        if not t:
+            return f"ERROR: tool {full_name} not found"
+        try:
+            return await self.mcp.call(full_name, args)
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    @_authorized
+    async def cmd_forget(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Manage memory: list records, delete one, or delete all.
+
+        Deletion is only accessible here — the LLM never sees delete tools.
+        """
+        user_id = update.effective_user.id
+        memory_id = await self._memory_id(user_id)
+        args = ctx.args or []
+
+        if not args:
+            await update.message.reply_text(
+                "Управление долговременной памятью:\n\n"
+                "/forget list — показать все записи (обе зоны)\n"
+                "/forget <id> — удалить конкретную запись\n"
+                "/forget all CONFIRM — удалить ВСЕ записи (с подтверждением)\n\n"
+                "Удаление мягкое: можно восстановить командой /restore <id>."
+            )
+            return
+
+        cmd = args[0].lower()
+
+        if cmd == "list":
+            common = await self._memory_call("list_memories", {"user_id": memory_id})
+            private = await self._memory_call("list_memories", {"user_id": f"{memory_id}_private"})
+            await update.message.reply_text(
+                f"📚 Общая зона ({memory_id}):\n{common}\n\n"
+                f"🔒 Приватная зона ({memory_id}_private):\n{private}"
+            )
+            return
+
+        if cmd == "all":
+            if len(args) < 2 or args[1] != "CONFIRM":
+                await update.message.reply_text(
+                    "⚠️ Это удалит ВСЕ записи из обеих зон.\n\n"
+                    "Чтобы подтвердить, отправь:\n"
+                    "/forget all CONFIRM"
+                )
+                return
+            r1 = await self._memory_call(
+                "delete_all_memories",
+                {"user_id": memory_id, "confirm": True},
+            )
+            r2 = await self._memory_call(
+                "delete_all_memories",
+                {"user_id": f"{memory_id}_private", "confirm": True},
+            )
+            await update.message.reply_text(
+                f"Общая зона: {r1}\n"
+                f"Приватная зона: {r2}\n\n"
+                "Восстановить: /restore <id>"
+            )
+            return
+
+        # Otherwise: args[0] is a memory id
+        mem_id = args[0]
+        r1 = await self._memory_call(
+            "delete_memories",
+            {"memory_ids": [mem_id], "user_id": memory_id},
+        )
+        r2 = await self._memory_call(
+            "delete_memories",
+            {"memory_ids": [mem_id], "user_id": f"{memory_id}_private"},
+        )
+        await update.message.reply_text(
+            f"Общая зона: {r1}\n"
+            f"Приватная зона: {r2}"
+        )
+
+    @_authorized
+    async def cmd_restore(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Restore a soft-deleted memory record by ID."""
+        user_id = update.effective_user.id
+        memory_id = await self._memory_id(user_id)
+        args = ctx.args or []
+
+        if not args:
+            await update.message.reply_text("Использование: /restore <memory_id>")
+            return
+
+        mem_id = args[0]
+        r1 = await self._memory_call(
+            "restore_memories",
+            {"memory_ids": [mem_id], "user_id": memory_id},
+        )
+        r2 = await self._memory_call(
+            "restore_memories",
+            {"memory_ids": [mem_id], "user_id": f"{memory_id}_private"},
+        )
+        await update.message.reply_text(
+            f"Общая зона: {r1}\n"
+            f"Приватная зона: {r2}"
         )
 
     @_authorized
@@ -565,7 +664,11 @@ class Bot:
             }
 
         model = await self.state.get_model(user_id, name)
-        tools = self.mcp.openai_tools()
+        # Filter out destructive tools — the LLM must not see them.
+        tools = [
+            t for t in self.mcp.openai_tools()
+            if t["function"]["name"] not in FORBIDDEN_TOOLS_FOR_LLM
+        ]
 
         placeholder = await msg.reply_text("…")
         last_edit = 0.0
@@ -625,10 +728,21 @@ class Bot:
                 for i, tc in enumerate(collected_tool_calls):
                     call_id = tc["id"] or f"call_{i}"
                     log.info("TOOL CALL: %s(%s)", tc["name"], tc["arguments"])
-                    try:
-                        result = await self.mcp.call(tc["name"], tc["arguments"])
-                    except Exception as e:
-                        result = f"ERROR: {e}"
+
+                    # Defensive: refuse to execute forbidden tools even if
+                    # the model somehow learns their names.
+                    if tc["name"] in FORBIDDEN_TOOLS_FOR_LLM:
+                        result = (
+                            "ERROR: this tool is disabled. "
+                            "To delete memories, use the /forget command in Telegram."
+                        )
+                        log.warning("Blocked forbidden tool call: %s", tc["name"])
+                    else:
+                        try:
+                            result = await self.mcp.call(tc["name"], tc["arguments"])
+                        except Exception as e:
+                            result = f"ERROR: {e}"
+
                     log.info("TOOL RESULT (%d chars): %s", len(result), result[:500])
                     if len(result) > 8000:
                         result = result[:8000] + "\n…(truncated)"
