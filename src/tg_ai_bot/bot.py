@@ -727,7 +727,8 @@ class Bot:
 
                 for i, tc in enumerate(collected_tool_calls):
                     call_id = tc["id"] or f"call_{i}"
-                    log.info("TOOL CALL: %s(%s)", tc["name"], tc["arguments"])
+                    args_preview = str(tc["arguments"])[:250]
+                    log.info("TOOL CALL: %s(%s)", tc["name"], args_preview)
 
                     if tc["name"] in FORBIDDEN_TOOLS_FOR_LLM:
                         result = (
@@ -741,7 +742,7 @@ class Bot:
                         except Exception as e:
                             result = f"ERROR: {e}"
 
-                    log.info("TOOL RESULT (%d chars): %s", len(result), result[:500])
+                    log.info("TOOL RESULT (%d chars): %s", len(result), result[:250])
                     if len(result) > 8000:
                         result = result[:8000] + "\n…(truncated)"
                     messages.append({

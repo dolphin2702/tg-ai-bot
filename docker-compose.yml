@@ -6,6 +6,9 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
+      LOG_DIR: /app/logs
+    volumes:
+      - ./logs:/app/logs   
     depends_on:
       - redis
 
