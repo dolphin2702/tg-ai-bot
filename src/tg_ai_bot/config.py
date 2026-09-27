@@ -119,6 +119,8 @@ class Config:
     mcp_servers: dict[str, str] = field(default_factory=dict)
     rate_per_min: int = 10
     rate_per_day: int = 100
+    summarize: bool = True
+    summarize_keep_recent: int = 10
 
 
 def _load_engines() -> dict[str, EngineConfig]:
@@ -196,6 +198,13 @@ def _load_mcp_servers() -> dict[str, str]:
     return servers
 
 
+def _env_bool(key: str, default: bool = False) -> bool:
+    raw = _env(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_config() -> Config:
     engines = _load_engines()
     if not engines:
@@ -223,6 +232,8 @@ def load_config() -> Config:
     mcp_servers = _load_mcp_servers()
     rate_per_min = int(_env("RATE_PER_MIN", default="10") or "10")
     rate_per_day = int(_env("RATE_PER_DAY", default="100") or "100")
+    summarize = _env_bool("SUMMARIZE", default=True)
+    summarize_keep_recent = int(_env("SUMMARIZE_KEEP_RECENT", default="10") or "10")
 
     return Config(
         telegram_token=_env("TELEGRAM_TOKEN", required=True),
@@ -239,4 +250,6 @@ def load_config() -> Config:
         mcp_servers=mcp_servers,
         rate_per_min=rate_per_min,
         rate_per_day=rate_per_day,
+        summarize=summarize,
+        summarize_keep_recent=summarize_keep_recent,
     )

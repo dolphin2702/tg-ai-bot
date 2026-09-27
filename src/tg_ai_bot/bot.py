@@ -190,12 +190,6 @@ class Bot:
         return await self.state.get_memory_id(user_id) or str(user_id)
 
     async def _check_rate(self, user_id: int) -> tuple[bool, str]:
-        """Return (allowed, reason_if_denied).
-
-        Two counters: per minute and per day. Both are stored in Redis with
-        a TTL slightly longer than their window, so they auto-clean.
-        A limit of 0 disables the corresponding check.
-        """
         per_min = self.cfg.rate_per_min
         per_day = self.cfg.rate_per_day
 
@@ -216,6 +210,81 @@ class Bot:
                 )
 
         return True, ""
+
+    # ---------- summarization ----------
+
+    async def _summarize_history(
+        self,
+        history: list[dict],
+        engine: Engine,
+        user_id: int,
+        name: str,
+    ) -> list[dict]:
+        """Summarize old messages into one system message.
+
+        Triggered when ``len(history) >= history_limit``. The last
+        ``summarize_keep_recent`` messages stay intact; everything before
+        them is compressed into a single system message of the form
+        ``[Ранее: ...]``.
+
+        Returns the (possibly new) history. On any failure, returns the
+        input history unchanged — the caller will fall back to plain
+        truncation via ``State.set_history``.
+        """
+        if not self.cfg.summarize:
+            return history
+
+        limit = self.state.history_limit
+        if limit <= 0 or len(history) < limit:
+            return history
+
+        keep = max(1, self.cfg.summarize_keep_recent)
+        if keep >= len(history):
+            return history
+
+        to_summarize = history[:-keep]
+        fresh = history[-keep:]
+
+        # Build a compact dialog representation for the summary prompt.
+        dialog_lines: list[str] = []
+        for m in to_summarize:
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            if isinstance(content, str) and content:
+                dialog_lines.append(f"{role}: {content}")
+        dialog = "\n".join(dialog_lines)
+
+        summary_prompt = (
+            "Сожми следующий диалог в 3-5 предложений на русском языке. "
+            "Сохрани ключевые факты, решения, договорённости и контекст. "
+            "Пиши от третьего лица. Без вступлений — только резюме.\n\n"
+            f"Диалог:\n{dialog}"
+        )
+
+        try:
+            messages = [Message(role="user", content=summary_prompt)]
+            chunks: list[str] = []
+            async for chunk in engine.chat(messages, models=None):
+                chunks.append(chunk)
+            summary = "".join(chunks).strip()
+        except Exception as e:
+            log.warning("Summarization failed: %s", e)
+            return history
+
+        if not summary:
+            log.warning("Summarization returned empty result")
+            return history
+
+        new_history = [
+            {"role": "system", "content": f"[Ранее: {summary}]"}
+        ] + fresh
+
+        log.info(
+            "Summarized %d old messages into %d chars (%d kept fresh)",
+            len(to_summarize), len(summary), len(fresh),
+        )
+        await self.state.set_history(user_id, name, new_history)
+        return new_history
 
     # ---------- commands ----------
 
@@ -276,7 +345,6 @@ class Bot:
         user_id = update.effective_user.id
         per_min = self.cfg.rate_per_min
         per_day = self.cfg.rate_per_day
-        # incr_rate sets TTL and increments — that's why we subtract 1.
         min_count = await self.state.incr_rate(user_id, "min", 120)
         day_count = await self.state.incr_rate(user_id, "day", 90000)
         await update.message.reply_text(
@@ -547,6 +615,10 @@ class Bot:
             mcp_info = f"{len(self.mcp.tools)} инструментов"
         models_list = getattr(engine, "models", []) or []
         fallback = ", ".join(models_list[1:]) if len(models_list) > 1 else "нет"
+        summarize_info = (
+            f"вкл (оставляем {self.cfg.summarize_keep_recent})"
+            if self.cfg.summarize else "выкл"
+        )
         await update.message.reply_text(
             f"Движок: {name}\n"
             f"Модель: {model}\n"
@@ -556,6 +628,7 @@ class Bot:
             f"{sys_info}\n"
             f"memory_id: {memory_id}\n"
             f"История: {len(history)} сообщений (лимит {self.state.history_limit})\n"
+            f"Суммаризация: {summarize_info}\n"
             f"MCP: {mcp_info}"
         )
 
@@ -619,6 +692,8 @@ class Bot:
             messages = [Message(role="user", content=_stamp_date(text))]
         else:
             history = await self.state.get_history(user_id, name)
+            # Summarize BEFORE appending — if history is full, we compress it.
+            history = await self._summarize_history(history, engine, user_id, name)
             history.append({"role": "user", "content": text})
             messages = [Message(role=m["role"], content=m["content"]) for m in history]
             if messages and messages[-1].role == "user":
@@ -705,6 +780,8 @@ class Bot:
         system_prompt = _render_prompt(system_prompt, memory_id)
 
         history = await self.state.get_history(user_id, name)
+        # Summarize BEFORE appending — if history is full, we compress it.
+        history = await self._summarize_history(history, engine, user_id, name)
         history.append({"role": "user", "content": text})
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
