@@ -43,7 +43,7 @@ class AnythingLLMEngine(Engine):
         messages: list[Message],
         *,
         thread_id: str | None = None,
-        model: str | None = None,
+        models: str | None = None,
     ) -> AsyncIterator[str]:
         user_msg = next(
             (m.content for m in reversed(messages) if m.role == "user"), ""

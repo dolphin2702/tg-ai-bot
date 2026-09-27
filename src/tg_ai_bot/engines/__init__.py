@@ -1,5 +1,5 @@
 from ..config import EngineConfig
-from .base import Engine, Message
+from .base import Engine, EngineUnavailable, Message
 from .openai_compat import OpenAICompatEngine
 from .anythingllm import AnythingLLMEngine
 
@@ -10,7 +10,7 @@ def build_engine(cfg: EngineConfig) -> Engine:
             name=cfg.name,
             base_url=cfg.params["base_url"],
             api_key=cfg.params["api_key"],
-            model=cfg.params["model"],
+            models=cfg.params["models"],
         )
     if cfg.type == "anythingllm":
         return AnythingLLMEngine(
@@ -21,4 +21,4 @@ def build_engine(cfg: EngineConfig) -> Engine:
     raise ValueError(f"Unknown engine type: {cfg.type}")
 
 
-__all__ = ["Engine", "Message", "build_engine"]
+__all__ = ["Engine", "EngineUnavailable", "Message", "build_engine"]

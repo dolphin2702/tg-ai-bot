@@ -286,9 +286,11 @@ class Bot:
         name, engine = await self._current(user_id)
         args = ctx.args or []
         if not args:
-            cur = await self.state.get_model(user_id, name) or getattr(engine, "model", "—")
+            cur = await self.state.get_model(user_id, name) or engine.default_model
             await update.message.reply_text(
-                f"Модель ({name}): {cur}\nСменить: /model <name>"
+                f"Модель ({name}): {cur}\n"
+                f"Доступные для fallback: {', '.join(getattr(engine, 'models', []) or [])}\n"
+                "Сменить: /model <name>"
             )
             return
         await self.state.set_model(user_id, name, args[0])
@@ -381,7 +383,6 @@ class Bot:
     # ---------- memory management (manual, not via LLM) ----------
 
     async def _memory_call(self, tool: str, args: dict) -> str:
-        """Direct MCP call to memory tools, bypassing the LLM."""
         if not self.mcp:
             return "ERROR: MCP not available"
         full_name = f"memory__{tool}"
@@ -395,10 +396,6 @@ class Bot:
 
     @_authorized
     async def cmd_forget(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Manage memory: list records, delete one, or delete all.
-
-        Deletion is only accessible here — the LLM never sees delete tools.
-        """
         user_id = update.effective_user.id
         memory_id = await self._memory_id(user_id)
         args = ctx.args or []
@@ -447,7 +444,6 @@ class Bot:
             )
             return
 
-        # Otherwise: args[0] is a memory id
         mem_id = args[0]
         r1 = await self._memory_call(
             "delete_memories",
@@ -464,7 +460,6 @@ class Bot:
 
     @_authorized
     async def cmd_restore(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Restore a soft-deleted memory record by ID."""
         user_id = update.effective_user.id
         memory_id = await self._memory_id(user_id)
         args = ctx.args or []
@@ -491,7 +486,7 @@ class Bot:
     async def cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         name, engine = await self._current(user_id)
-        model = await self.state.get_model(user_id, name) or getattr(engine, "model", "—")
+        model = await self.state.get_model(user_id, name) or engine.default_model
         stateful = "да" if engine.is_stateful() else "нет"
         tools = "да" if engine.supports_tools() else "нет"
         memory_id = await self._memory_id(user_id)
@@ -504,9 +499,12 @@ class Bot:
         mcp_info = "—"
         if self.mcp and self.mcp.tools:
             mcp_info = f"{len(self.mcp.tools)} инструментов"
+        models_list = getattr(engine, "models", []) or []
+        fallback = ", ".join(models_list[1:]) if len(models_list) > 1 else "нет"
         await update.message.reply_text(
             f"Движок: {name}\n"
             f"Модель: {model}\n"
+            f"Fallback: {fallback}\n"
             f"Stateful: {stateful}\n"
             f"Поддержка инструментов: {tools}\n"
             f"{sys_info}\n"
@@ -587,7 +585,8 @@ class Bot:
                     await msg.reply_text(f"❌ Не удалось создать тред: {e}")
                     return
 
-        model = await self.state.get_model(user_id, name)
+        user_model = await self.state.get_model(user_id, name)
+        models = [user_model] if user_model else None
 
         buffer = ""
         consumed = 0
@@ -596,7 +595,7 @@ class Bot:
         loop = asyncio.get_running_loop()
 
         try:
-            async for chunk in engine.chat(messages, thread_id=thread_id, model=model):
+            async for chunk in engine.chat(messages, thread_id=thread_id, models=models):
                 if user_id in self._cancelled:
                     self._cancelled.discard(user_id)
                     tail = _strip_tags(buffer[consumed:]).strip()
@@ -663,7 +662,8 @@ class Bot:
                 "content": _stamp_date(messages[-1]["content"]),
             }
 
-        model = await self.state.get_model(user_id, name)
+        user_model = await self.state.get_model(user_id, name)
+        models = [user_model] if user_model else None
         # Filter out destructive tools — the LLM must not see them.
         tools = [
             t for t in self.mcp.openai_tools()
@@ -681,7 +681,7 @@ class Bot:
                 collected_tool_calls: list[dict] = []
                 text_buffer = ""
 
-                async for event in engine.chat_with_tools(messages, tools=tools, model=model):
+                async for event in engine.chat_with_tools(messages, tools=tools, models=models):
                     if user_id in self._cancelled:
                         self._cancelled.discard(user_id)
                         await _safe_edit(placeholder, "⏹️ Остановлено")
@@ -729,8 +729,6 @@ class Bot:
                     call_id = tc["id"] or f"call_{i}"
                     log.info("TOOL CALL: %s(%s)", tc["name"], tc["arguments"])
 
-                    # Defensive: refuse to execute forbidden tools even if
-                    # the model somehow learns their names.
                     if tc["name"] in FORBIDDEN_TOOLS_FOR_LLM:
                         result = (
                             "ERROR: this tool is disabled. "
