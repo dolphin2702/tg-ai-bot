@@ -64,15 +64,19 @@ DEFAULT_SYSTEM_PROMPT = (
 
     "Про работу с памятью:\n"
     "- У тебя есть MCP-сервер долговременной памяти. Факты сохраняются между "
-    "сессиями — это реально работающая функция, а не гипотетическая.\n"
-    "- Сохраняй личные факты о пользователе автоматически: имя, предпочтения, "
-    "привычки, важные события.\n"
+    "сессиями — это реально работающая функция.\n"
+    "- Для всех вызовов memory__* используй ТОЛЬКО тот user_id, который указан "
+    "выше в плейсхолдерах: {user_id} и {user_id}_private. "
+    "НЕ придумывай свои значения, НЕ используй 'default' или 'user'.\n"
+    "- Сохраняй только ФАКТЫ О ПОЛЬЗОВАТЕЛЕ (имя, предпочтения, привычки, "
+    "важные события) и СПРАВОЧНЫЕ ЗНАНИЯ (термины, факты об организациях).\n"
+    "- НЕ сохраняй: системные инструкции, даты, плейсхолдеры, свои рассуждения, "
+    "служебную информацию. Если сомневаешься — не сохраняй.\n"
     "- Ты умеешь: создавать (memory__add_memories), искать "
     "(memory__search_memories), показывать (memory__list_memories).\n"
     "- Ты НЕ умеешь удалять: инструментов удаления у тебя нет. Если пользователь "
     "просит забыть/удалить что-то о нём — ответь ОДНОЙ фразой: «Используйте "
-    "команду /forget в этом чате». Не рассуждай про кэш, не предлагай "
-    "альтернатив, не объясняй, чего не можешь.\n"
+    "команду /forget в этом чате».\n"
     "- При уточнении, которое противоречит сохранённому, просто добавь новую "
     "запись с пометкой «(уточнение) …» — не удаляй старую.\n"
     "- Перед советом или отсылкой к прошлому — ищи в памяти через "
@@ -84,9 +88,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "- Кэш — служебное временное хранилище внутри ОДНОЙ задачи. Например, "
     "сохранить промежуточный результат, чтобы не считать дважды.\n"
     "- НИКОГДА не используй кэш для долговременных фактов о пользователе — "
-    "для этого есть память (memory__*).\n"
-    "- Если пользователь спрашивает «что я предпочитаю / что ты обо мне знаешь / "
-    "помнишь ли ты» — используй memory__search_memories, НЕ cache_get.\n\n"
+    "для этого есть память (memory__*).\n\n"
 
     "Про историю диалога:\n"
     "- Внутри одной сессии ты помнишь последние N сообщений этого диалога.\n"
@@ -115,6 +117,8 @@ class Config:
     history_limit: int = 50
     mcp_max_iter: int = 8
     mcp_servers: dict[str, str] = field(default_factory=dict)
+    rate_per_min: int = 10
+    rate_per_day: int = 100
 
 
 def _load_engines() -> dict[str, EngineConfig]:
@@ -130,7 +134,6 @@ def _load_engines() -> dict[str, EngineConfig]:
         if not base_url:
             continue
 
-        # Support both OPENROUTER_MODELS (list) and OPENROUTER_MODEL (single).
         models_raw = _env(f"{name}_MODELS")
         if not models_raw:
             models_raw = _env(f"{name}_MODEL")
@@ -164,6 +167,7 @@ def _load_engines() -> dict[str, EngineConfig]:
         )
 
     return engines
+
 
 def _parse_ids(raw: str | None) -> set[int]:
     if not raw:
@@ -217,6 +221,8 @@ def load_config() -> Config:
     history_limit = int(_env("HISTORY_LIMIT", default="50") or "50")
     mcp_max_iter = int(_env("MCP_MAX_ITER", default="8") or "8")
     mcp_servers = _load_mcp_servers()
+    rate_per_min = int(_env("RATE_PER_MIN", default="10") or "10")
+    rate_per_day = int(_env("RATE_PER_DAY", default="100") or "100")
 
     return Config(
         telegram_token=_env("TELEGRAM_TOKEN", required=True),
@@ -231,4 +237,6 @@ def load_config() -> Config:
         history_limit=history_limit,
         mcp_max_iter=mcp_max_iter,
         mcp_servers=mcp_servers,
+        rate_per_min=rate_per_min,
+        rate_per_day=rate_per_day,
     )

@@ -149,6 +149,7 @@ class Bot:
         app.add_handler(CommandHandler("model",     self.cmd_model))
         app.add_handler(CommandHandler("system",    self.cmd_system))
         app.add_handler(CommandHandler("memory_id", self.cmd_memory_id))
+        app.add_handler(CommandHandler("limits",    self.cmd_limits))
         app.add_handler(CommandHandler("forget",    self.cmd_forget))
         app.add_handler(CommandHandler("restore",   self.cmd_restore))
         app.add_handler(CommandHandler("status",    self.cmd_status))
@@ -188,6 +189,34 @@ class Bot:
     async def _memory_id(self, user_id: int) -> str:
         return await self.state.get_memory_id(user_id) or str(user_id)
 
+    async def _check_rate(self, user_id: int) -> tuple[bool, str]:
+        """Return (allowed, reason_if_denied).
+
+        Two counters: per minute and per day. Both are stored in Redis with
+        a TTL slightly longer than their window, so they auto-clean.
+        A limit of 0 disables the corresponding check.
+        """
+        per_min = self.cfg.rate_per_min
+        per_day = self.cfg.rate_per_day
+
+        if per_min > 0:
+            count = await self.state.incr_rate(user_id, "min", 120)
+            if count > per_min:
+                return False, (
+                    f"слишком много запросов в минуту "
+                    f"(лимит {per_min}). Подожди немного."
+                )
+
+        if per_day > 0:
+            count = await self.state.incr_rate(user_id, "day", 90000)
+            if count > per_day:
+                return False, (
+                    f"исчерпан дневной лимит ({per_day} запросов). "
+                    f"Попробуй завтра."
+                )
+
+        return True, ""
+
     # ---------- commands ----------
 
     @_authorized
@@ -214,6 +243,7 @@ class Bot:
             "/model <name> — сменить модель\n"
             "/system — системный промпт\n"
             "/memory_id — ID для долговременной памяти\n"
+            "/limits — текущие лимиты запросов\n"
             "/forget — управление памятью (list / <id> / all)\n"
             "/restore <id> — восстановить удалённую запись\n"
             "/status — что выбрано сейчас\n"
@@ -240,6 +270,21 @@ class Bot:
         user_id = update.effective_user.id
         self._cancelled.add(user_id)
         await update.message.reply_text("⏹️ Останавливаю…")
+
+    @_authorized
+    async def cmd_limits(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        per_min = self.cfg.rate_per_min
+        per_day = self.cfg.rate_per_day
+        # incr_rate sets TTL and increments — that's why we subtract 1.
+        min_count = await self.state.incr_rate(user_id, "min", 120)
+        day_count = await self.state.incr_rate(user_id, "day", 90000)
+        await update.message.reply_text(
+            f"Лимиты:\n"
+            f"  в минуту: {per_min} (использовано сейчас: {min_count - 1})\n"
+            f"  в день:   {per_day} (использовано сегодня: {day_count - 1})\n\n"
+            f"0 = лимит отключён."
+        )
 
     @_authorized
     async def cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -287,9 +332,10 @@ class Bot:
         args = ctx.args or []
         if not args:
             cur = await self.state.get_model(user_id, name) or engine.default_model
+            fallback = ", ".join(getattr(engine, "models", [])[1:]) or "нет"
             await update.message.reply_text(
                 f"Модель ({name}): {cur}\n"
-                f"Доступные для fallback: {', '.join(getattr(engine, 'models', []) or [])}\n"
+                f"Fallback: {fallback}\n"
                 "Сменить: /model <name>"
             )
             return
@@ -545,6 +591,13 @@ class Bot:
                 return
 
         self._cancelled.discard(user_id)
+
+        allowed, reason = await self._check_rate(user_id)
+        if not allowed:
+            log.warning("Rate limit hit: user_id=%s reason=%s", user_id, reason)
+            await msg.reply_text(f"⚠️ {reason[0].upper()}{reason[1:]}")
+            return
+
         name, engine = await self._current(user_id)
         memory_id = await self._memory_id(user_id)
 
@@ -727,7 +780,7 @@ class Bot:
 
                 for i, tc in enumerate(collected_tool_calls):
                     call_id = tc["id"] or f"call_{i}"
-                    args_preview = str(tc["arguments"])[:250]
+                    args_preview = str(tc["arguments"])[:200]
                     log.info("TOOL CALL: %s(%s)", tc["name"], args_preview)
 
                     if tc["name"] in FORBIDDEN_TOOLS_FOR_LLM:
@@ -742,7 +795,7 @@ class Bot:
                         except Exception as e:
                             result = f"ERROR: {e}"
 
-                    log.info("TOOL RESULT (%d chars): %s", len(result), result[:250])
+                    log.info("TOOL RESULT (%d chars): %s", len(result), result[:200])
                     if len(result) > 8000:
                         result = result[:8000] + "\n…(truncated)"
                     messages.append({

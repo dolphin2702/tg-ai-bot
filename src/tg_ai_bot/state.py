@@ -113,3 +113,32 @@ class State:
 
     async def is_known(self, user_id: int) -> bool:
         return (await self._get(f"tgbot:known:{user_id}")) == "1"
+
+    # ---- rate limiting ----
+    async def incr_rate(self, user_id: int, window: str, ttl: int) -> int:
+        """Atomically increment a rate counter.
+
+        ``window`` is "min" or "day" — creates a separate key per period.
+        Returns the new counter value. TTL is set on every call so the key
+        auto-expires; the exact TTL only matters if no further increments
+        happen within the period.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        if window == "min":
+            period = now.strftime("%Y%m%d%H%M")
+        else:
+            period = now.strftime("%Y%m%d")
+        key = f"tgbot:rate:{user_id}:{window}:{period}"
+
+        if self._redis:
+            pipe = self._redis.pipeline()
+            pipe.incr(key)
+            pipe.expire(key, ttl)
+            results = await pipe.execute()
+            return int(results[0])
+        if self._memory is not None:
+            val = int(self._memory.get(key, "0")) + 1
+            self._memory[key] = str(val)
+            return val
+        return 0
